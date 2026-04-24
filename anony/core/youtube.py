@@ -50,14 +50,24 @@ class YouTube:
 
     async def save_cookies(self, urls: list[str]) -> None:
         logger.info("Saving cookies from urls...")
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15)  # ⚡ 15 sec timeout — batbin hang nahi karega
+        ) as session:
             for url in urls:
-                name = url.split("/")[-1]
-                link = "https://batbin.me/raw/" + name
-                async with session.get(link) as resp:
-                    resp.raise_for_status()
-                    with open(f"{self.cookie_dir}/{name}.txt", "wb") as fw:
-                        fw.write(await resp.read())
+                try:
+                    # ✅ Direct URL use karo — batbin redirect nahi
+                    async with session.get(url, allow_redirects=True) as resp:
+                        resp.raise_for_status()
+                        # File name URL ke last part se lo
+                        name = url.rstrip("/").split("/")[-1]
+                        if not name.endswith(".txt"):
+                            name = name + ".txt"
+                        save_path = f"{self.cookie_dir}/{name}"
+                        with open(save_path, "wb") as fw:
+                            fw.write(await resp.read())
+                        logger.info(f"Cookie saved: {save_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to save cookie from {url}: {e}")
         logger.info(f"Cookies saved in {self.cookie_dir}.")
 
     def valid(self, url: str) -> bool:
@@ -115,10 +125,12 @@ class YouTube:
         ext = "mp4" if video else "webm"
         filename = f"downloads/{video_id}.{ext}"
 
+        # ✅ Already downloaded hai toh skip karo — no re-download
         if Path(filename).exists():
             return filename
 
         cookie = self.get_cookies()
+
         base_opts = {
             "outtmpl": "downloads/%(id)s.%(ext)s",
             "quiet": True,
@@ -128,18 +140,26 @@ class YouTube:
             "overwrites": False,
             "nocheckcertificate": True,
             "cookiefile": cookie,
+            # ⚡ Speed optimizations
+            "socket_timeout": 10,        # 10 sec mein connect na ho toh skip
+            "retries": 2,                # Zyada retry nahi — fast fail
+            "fragment_retries": 2,
+            "concurrent_fragment_downloads": 4,  # ⚡ Parallel fragments download
+            "buffersize": 1024 * 16,     # 16KB buffer — faster streaming
+            "http_chunk_size": 10485760, # 10MB chunks
         }
 
         if video:
             ydl_opts = {
                 **base_opts,
-                "format": "(bestvideo[height<=?720][width<=?1280][ext=mp4])+(bestaudio)",
+                "format": "bestvideo[height<=?720][width<=?1280][ext=mp4]+bestaudio/best",
                 "merge_output_format": "mp4",
             }
         else:
             ydl_opts = {
                 **base_opts,
-                "format": "bestaudio[ext=webm][acodec=opus]",
+                # ⚡ bestaudio/best — agar webm nahi mila toh best available lo, slow format search nahi
+                "format": "bestaudio[ext=webm][acodec=opus]/bestaudio/best",
             }
 
         def _download():
@@ -151,6 +171,7 @@ class YouTube:
                 except Exception as ex:
                     logger.warning("Download failed: %s", ex)
                     return None
-            return filename
+            return filename if Path(filename).exists() else None
 
         return await asyncio.to_thread(_download)
+        
