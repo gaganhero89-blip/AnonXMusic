@@ -116,7 +116,9 @@ async def play_hndlr(
             return
 
     if not file.file_path:
-        fname = f"downloads/{file.id}.{'mp4' if video else 'webm'}"
+        # ✅ Fix: audio = m4a (Fallen API), video = mp4
+        ext = "mp4" if video else "m4a"
+        fname = f"downloads/{file.id}.{ext}"
         if Path(fname).exists():
             file.file_path = fname
         else:
@@ -131,3 +133,4 @@ async def play_hndlr(
         chat_id=m.chat.id,
         text=m.lang["playlist_queued"].format(len(tracks)) + added,
     )
+    
