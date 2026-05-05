@@ -33,10 +33,7 @@ class YouTube:
             r"|playlist\?list=PL[A-Za-z0-9_-]+|[A-Za-z0-9_-]{11}))\S*"
         )
         self._headers = {"api-key": API_KEY}
-        # Concurrent download lock — same video_id ke double download rokta hai
         self._locks: dict[str, asyncio.Lock] = {}
-
-    # ── URL validators ────────────────────────────────────────────────────────
 
     def valid(self, url: str) -> bool:
         return bool(re.match(self.regex, url))
@@ -96,37 +93,29 @@ class YouTube:
             pass
         return tracks
 
-    # ── Fallen API se download ────────────────────────────────────────────────
+    # ── Fallen API download ───────────────────────────────────────────────────
 
     async def _fallen_download(self, video_id: str, video: bool) -> "str | None":
-        """
-        Fallen API call karke direct file URL lao, phir file download karo.
-
-        Expected API response:
-        {
-            "status": true,
-            "data": {
-                "url": "https://...direct-link...",
-                "title": "...",
-                ...
-            }
-        }
-        """
         if not API_KEY:
-            logger.warning("API_KEY set nahi hai — Fallen API kaam nahi karega.")
+            logger.warning("API_KEY set nahi hai!")
             return None
 
         yt_url = self.base + video_id
         media_type = "video" if video else "audio"
-        endpoint = f"{API_URL}/youtube"
-
-        params = {
-            "url": yt_url,
-            "type": media_type,   # "audio" ya "video"
-        }
-
         ext = "mp4" if video else "m4a"
         save_path = f"downloads/{video_id}.{ext}"
+
+        # Possible endpoints — pehle wala kaam kare toh baaki try nahi hoga
+        endpoints = [
+            f"{API_URL}/youtube",
+            f"{API_URL}/yt",
+            f"{API_URL}/download",
+            f"{API_URL}/dl",
+            f"{API_URL}/v1/youtube",
+            f"{API_URL}/v1/download",
+        ]
+
+        params = {"url": yt_url, "type": media_type}
 
         try:
             async with aiohttp.ClientSession(
@@ -134,25 +123,73 @@ class YouTube:
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as session:
 
-                # Step 1: API se direct download link lo
-                async with session.get(endpoint, params=params) as resp:
-                    if resp.status != 200:
-                        logger.warning(
-                            "Fallen API error: HTTP %s | video_id=%s", resp.status, video_id
-                        )
-                        return None
-                    data = await resp.json()
+                direct_url = None
 
-                if not data.get("status"):
-                    logger.warning("Fallen API: status=false | %s", data)
-                    return None
+                for endpoint in endpoints:
+                    try:
+                        async with session.get(endpoint, params=params) as resp:
+                            # ── DEBUG: Exact response log karo ──────────────
+                            body = await resp.text()
+                            logger.info(
+                                "Fallen API | endpoint=%s | status=%s | body=%s",
+                                endpoint, resp.status, body[:300]
+                            )
+                            # ────────────────────────────────────────────────
 
-                direct_url = data.get("data", {}).get("url")
+                            if resp.status == 404:
+                                continue  # Wrong endpoint, next try
+
+                            if resp.status != 200:
+                                logger.warning(
+                                    "Fallen API error | endpoint=%s | HTTP %s",
+                                    endpoint, resp.status
+                                )
+                                continue
+
+                            import json
+                            try:
+                                data = json.loads(body)
+                            except Exception:
+                                logger.warning("Fallen API: JSON parse failed | %s", body[:200])
+                                continue
+
+                            # Common response formats handle karo
+                            # Format 1: {"status": true, "data": {"url": "..."}}
+                            # Format 2: {"success": true, "url": "..."}
+                            # Format 3: {"result": {"url": "..."}}
+                            # Format 4: {"url": "..."}
+                            url_val = (
+                                data.get("data", {}).get("url")
+                                or data.get("url")
+                                or data.get("result", {}).get("url")
+                                or data.get("download_url")
+                                or data.get("link")
+                            )
+
+                            if url_val:
+                                direct_url = url_val
+                                logger.info("Fallen API: direct URL mila | %s", endpoint)
+                                break
+                            else:
+                                logger.warning(
+                                    "Fallen API: URL field nahi mila | response=%s", data
+                                )
+
+                    except asyncio.TimeoutError:
+                        logger.warning("Fallen API timeout | endpoint=%s", endpoint)
+                        continue
+                    except Exception as e:
+                        logger.warning("Fallen API request error | endpoint=%s | %s", endpoint, e)
+                        continue
+
                 if not direct_url:
-                    logger.warning("Fallen API: direct URL missing | %s", data)
+                    logger.error(
+                        "Fallen API: Koi bhi endpoint kaam nahi kiya | video_id=%s | "
+                        "Apne API provider se sahi endpoint confirm karo.", video_id
+                    )
                     return None
 
-                # Step 2: Direct URL se actual file download karo
+                # File download karo
                 async with session.get(direct_url) as file_resp:
                     file_resp.raise_for_status()
                     Path("downloads").mkdir(exist_ok=True)
@@ -160,37 +197,29 @@ class YouTube:
                         async for chunk in file_resp.content.iter_chunked(1024 * 64):
                             f.write(chunk)
 
-        except asyncio.TimeoutError:
-            logger.warning("Fallen API timeout | video_id=%s", video_id)
-            return None
         except Exception as e:
-            logger.warning("Fallen API download failed | video_id=%s | %s", video_id, e)
+            logger.error("Fallen API download failed | video_id=%s | %s", video_id, e)
             return None
 
         return save_path if Path(save_path).exists() else None
 
-    # ── Public download method ────────────────────────────────────────────────
+    # ── Public download ───────────────────────────────────────────────────────
 
     async def download(self, video_id: str, video: bool = False) -> "str | None":
         ext = "mp4" if video else "m4a"
         filename = f"downloads/{video_id}.{ext}"
 
-        # Pehle se file hai toh skip
         if Path(filename).exists():
             return filename
 
-        # Same video_id ke concurrent requests ko serialize karo
         if video_id not in self._locks:
             self._locks[video_id] = asyncio.Lock()
 
         async with self._locks[video_id]:
-            # Lock ke andar dobara check — race condition fix
             if Path(filename).exists():
                 return filename
-
             result = await self._fallen_download(video_id, video)
 
-        # Lock cleanup
         self._locks.pop(video_id, None)
         return result
-                
+                            
