@@ -18,8 +18,6 @@ from anony.plugins import all_modules
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  KEEP-ALIVE SERVER
-#  Render Web Service ke liye port open karna zaroori hai
-#  Bina iske Render process kill kar deta hai
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def keep_alive():
@@ -65,12 +63,8 @@ async def idle():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def main():
-    # ── Keep-alive PEHLE start karo ──────────────────────
-    # Render port scan karta hai deploy ke turant baad
-    # Agar port late mile to "No open ports" error aata hai
     await keep_alive()
 
-    # ── Bot startup (original same) ──────────────────────
     await db.connect()
     await app.boot()
     await userbot.boot()
@@ -81,8 +75,8 @@ async def main():
         importlib.import_module(f"anony.plugins.{module}")
     logger.info(f"Loaded {len(all_modules)} modules.")
 
-    if config.COOKIES_URL:
-        await yt.save_cookies(config.COOKIES_URL)
+    # Cookies hata di — ab Fallen API use hota hai (API_KEY / API_URL)
+    # yt.save_cookies() removed
 
     sudoers = await db.get_sudoers()
     app.sudoers.update(sudoers)
@@ -98,4 +92,4 @@ if __name__ == "__main__":
         asyncio.get_event_loop().run_until_complete(main())
     except KeyboardInterrupt:
         pass
-      
+  
